@@ -1,4 +1,4 @@
-from emceex.emceex import MCMC
+from emceex.emceex import EnsembleSampler
 
 __all__ = [
     "MCMC"
