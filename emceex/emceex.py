@@ -806,7 +806,7 @@ class EnsembleSampler(emcee.EnsembleSampler):
                     j = N_sample[i]
                     t = np.max(emcee.autocorr.integrated_time(np.swapaxes(self.chain, 0, 1)[:j, ...], tol=0))
                     if ~np.isfinite(t):
-                        t = mcmc.iteration//10
+                        t = self.iteration//10
                     tau_est[i] = t
 
             fig, ax = plt.subplots(figsize=(width, height))

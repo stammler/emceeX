@@ -184,6 +184,10 @@ def run(yaml_file, restart, verbose):
         print(f"# walkers:       {mcmc.nwalkers:6d}")
         print(f"# threads:       {N_threads:6d}")
         print()
+        if dumpfile:
+            print(f"Saving to '{dumpfile}'")
+            print(f"    with interval//thin_by = {interval//thin_by}.")
+        print()
         
     
     # Run the model
