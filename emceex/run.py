@@ -1,7 +1,7 @@
 import click
 import dill
 import emcee
-from emceex import MCMC
+from emceex import EnsembleSampler
 import importlib
 import numpy as np
 import os
@@ -13,27 +13,41 @@ import yaml
 @click.option("-r", "--restart", "restart", is_flag=True, show_default=True, default=False, help="Delete dump file and restart model.")
 @click.option('-v', '--verbose', default=0, count=True, show_default=True, help="Verbosity")
 def run(yaml_file, restart, verbose):
+    """
+    Function reads the .yaml configuration file and starts `emceex.EnsembleSampler`.
+    
+    Parameters
+    ----------
+    yaml_file : filestream
+        Stream of .yaml file
+    restart : boolean
+        If True sampler is forced to restart instead of resuming
+    verbose : int
+        Verbosity of run.
+    """
 
-    # Reading parameter file
+    # Reading yaml file
+    if verbose:
+            print(f"Reading '{yaml_file.name}'.")
     dct = yaml.safe_load(yaml_file)
     
-    # Reading savefile and deleting it if restarting
+    # Reading dumpfile and deleting it if restarting
     resume = False
-    savefile = dct.pop("savefile", None)
-    if savefile is not None:
-        savefile = Path(savefile)
+    dumpfile = dct.pop("dumpfile", None)
+    if dumpfile is not None:
+        dumpfile = Path(dumpfile)
         # Check if file exists
-        if savefile.is_file():
+        if dumpfile.is_file():
             # Remove file if restart flag given
             if restart:
                 if verbose:
-                    print(f"Removing '{savefile}'.")
-                savefile.unlink()
+                    print(f"Removing '{dumpfile}'.")
+                dumpfile.unlink()
             # Load file, if restart flag not given
             else:
                 if verbose:
-                    print(f"Loading {savefile}.")
-                mcmc = MCMC.load_dump(savefile)
+                    print(f"Loading {dumpfile}.")
+                mcmc = EnsembleSampler.load_dump(dumpfile)
                 resume = True
 
     # If we are not resuming, read required information
@@ -141,14 +155,14 @@ def run(yaml_file, restart, verbose):
             )
             moves.append(move)
     
-    # Create MCMC object if not resuming
+    # Create Sampler object if not resuming
     if not resume:
-        mcmc = MCMC(
+        mcmc = EnsembleSampler(
             N_walkers,
             pars,
             model_fn,
             x, y, yerr,
-            save_to_path=savefile,
+            savepath=dumpfile,
             model_kwargs=model_kwargs,
             moves=moves,
             **sampler_kwargs,
@@ -158,6 +172,19 @@ def run(yaml_file, restart, verbose):
         if moves:
             mcmc._moves, mcmc._weights = zip(*moves)
             mcmc._weights /= np.sum(mcmc._weights)
+            
+    # Print information
+    if verbose: 
+        print()
+        if resume:
+            print("Resuming...")
+        else:
+            print("Starting...")
+        print(f"# dimensions:    {mcmc.ndim:6d}")
+        print(f"# walkers:       {mcmc.nwalkers:6d}")
+        print(f"# threads:       {N_threads:6d}")
+        print()
+        
     
     # Run the model
     mcmc.run_mcmc(
@@ -167,6 +194,7 @@ def run(yaml_file, restart, verbose):
         beta=beta,
         delta=delta*thin_by,
         thin_by=thin_by,
+        verbose=verbose,
     )        
 
 if __name__ == "__main__":

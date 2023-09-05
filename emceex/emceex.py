@@ -343,7 +343,7 @@ class EnsembleSampler(emcee.EnsembleSampler):
         return self._model_fnc(theta, x, **model_kwargs)
         
     
-    def run_mcmc(self, nsteps, nthreads=None, interval=100, beta=100, delta=0.01, verbose=2, **emcee_kwargs):
+    def run_mcmc(self, nsteps, nthreads=0, interval=100, beta=100, delta=0.01, verbose=2, **emcee_kwargs):
         """
         Function is a wrapper for emcee to run the sampling.
         
@@ -351,8 +351,8 @@ class EnsembleSampler(emcee.EnsembleSampler):
         ----------
         nsteps : int
             Number of MCMC steps
-        nthreads : int of None, optional, default: None
-            If not None number of threads used in multiprocessing
+        nthreads : int of None, optional, default: 0
+            Number of threads used in mutiprocessing
         interval : int, optional, default: 100
             Checking for convergence after every interval step and
             writing of dump files
@@ -383,13 +383,14 @@ class EnsembleSampler(emcee.EnsembleSampler):
         # created and stored in the object. If nthreads is
         # None the pool is unset to turn off multiprocessing.
         # The actual computation happens within EnsembleSampler._run().
-        if nthreads is None:
-            self.pool = None
-            self._run(p0, nsteps, verbose=verbose, **emcee_kwargs)
-        else:
+        if nthreads:
             with mp.Pool(nthreads) as pool:
                 self.pool = pool
                 self._run(p0, nsteps, verbose=verbose, **emcee_kwargs)
+        else:
+            self.pool = None
+            self._run(p0, nsteps, verbose=verbose, **emcee_kwargs)
+            
             
             
     def _run(self, p0, nsteps, verbose=2, **emcee_kwargs):
@@ -477,12 +478,6 @@ class EnsembleSampler(emcee.EnsembleSampler):
         # Would be red otherwise after break.
         if hasattr(sampler, "container"):
             sampler.container.children[1].bar_style = "success"
-        # Save at the end in case nsteps%interval != 0
-        if self.savepath is not None:
-                pool = self.pool
-                self.pool = None
-                EnsembleSampler.write_dump(self.savepath, self)
-                self.pool = pool
 
                 
     def get_flat_samples(self, discard=None, thin=None):
