@@ -19,9 +19,9 @@ def read_version():
 setup(
     name=package_name,
 
-    description="",
-    #long_description=open("README.md").read(),
-    #long_description_content_type="text/markdown",
+    description="Extension and customization of MCMC code emcee.",
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
     keywords="science physics mathematics",
 
     url="https://github.com/stammler/emceex/",
