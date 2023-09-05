@@ -1,6 +1,7 @@
 import cornerhex
 import dill
 import emcee
+from emceex import utils
 import matplotlib.pyplot as plt
 import multiprocess as mp
 import numpy as np
@@ -731,3 +732,124 @@ class EnsembleSampler(emcee.EnsembleSampler):
             return np.percentile(flat_samples, 50, axis=0)
         else:
             raise RuntimeError("Unknown which: {}.".format(which))
+            
+    def evaluate_autocorrelation(self, display_meters=True, display_plot=True, N=15, width=6., height=3.75):
+        """
+        Function evaluates the autocorrelation time.
+        
+        Parameters
+        ----------
+        display_meters : boolen, optional, default: True
+            Show meters of all autocorrelation times
+        display_plot : boolean, optional, default: True
+            Show plot of the autocorrelation time evolution
+        N : int, optional, default: 15
+            Evaluate autocorrelation time at N points
+        width : float, optional, default: 6.
+            Width of plot
+        height : float, optional, default: 3.75
+            Height of plot
+            
+        Returns
+        -------
+        tau : array-like, (ndims,)
+            Autocorrelation time for each parameter
+        """
+        # Ignore warning that may come up if chain too short
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            tau = self.get_autocorr_time(tol=0)
+        # If the autocorrelation time is not finite we set it to
+        # one tenth of the current iteration.
+        tau = np.where(np.isfinite(tau), tau, self.iteration//10)
+
+        # Display meters
+        if display_meters:
+            # Maximum character length of labels.
+            lmax = len("mean")
+            for i in range(self.ndim):
+                if len(self.labels[i])>lmax:
+                    lmax = len(self.labels[i])
+            # Maximum value of tau
+            tmax = tau.max()
+            # Maximum digits of tau
+            imax = int(np.ceil(np.log10(tmax)))
+
+            print()
+
+            spec = "    {label:<{lmax}}"
+            fmt = "{:" + "{:d}".format(imax) + ".0f}"
+            cl = "blue"
+            for i in range(self.ndim):
+                cr = "yellow"
+                if tau[i]>1.5*np.mean(tau):
+                    cr = "red"
+                s = spec.format(label=self.labels[i]+":", lmax=lmax+1)
+                utils.print_meter(s, tau[i], np.mean(tau), tmax, cl=cl, cr=cr, fmt=fmt)
+
+            print()
+            s = spec.format(label="mean:", lmax=lmax+1)
+            utils.print_meter(s, np.mean(tau), np.mean(tau), tmax, cl=cl, fmt=fmt)
+            print()
+
+        # Display plot of tau evolution
+        if display_plot:
+            # Compute estimates of the autocorrelation time
+            # Starting from 1000 of one tenth of the current iteration
+            start = np.minimum(1000, self.iteration//10)
+            fin = self.iteration
+            N_sample = np.linspace(start, fin, N, dtype=int)
+            tau_est = np.empty(N)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore")
+                for i in tqdm(range(N), desc="Est. autocor. times", leave=False):
+                    j = N_sample[i]
+                    t = np.max(emcee.autocorr.integrated_time(np.swapaxes(self.chain, 0, 1)[:j, ...], tol=0))
+                    if ~np.isfinite(t):
+                        t = mcmc.iteration//10
+                    tau_est[i] = t
+
+            fig, ax = plt.subplots(figsize=(width, height))
+            tau_lim = N_sample/self.beta
+            ax.set_xlim(N_sample.min(), N_sample.max())
+            ax.loglog(N_sample, tau_est, ".-", label="Sampler", c="black")
+            ax.loglog(N_sample, tau_lim, "--", c="black", label=r"Convergence limit, $\beta = {:.0f}$".format(self.beta))
+            x, y = np.linspace(*ax.get_xlim(), 100), np.geomspace(*ax.get_ylim(), 100)
+            cm = y[None, :]/x[:, None]*self.beta
+            ax.contourf(x, y, cm.T, levels=np.arange(1, 11), extend="both", cmap="coolwarm")
+            ax.contour(x, y, cm.T, levels=np.arange(1, 11), linewidths=0.5, colors="white", alpha=0.5, zorder=1)
+            ax.set_xlabel("Number of steps")
+            ax.set_ylabel("Estimated autocorrelation time")
+            ax.legend()
+            ax.set_xscale("linear")
+            ax.set_yscale("linear")
+            fig.tight_layout()
+
+        return tau
+    
+    def estimate_progress(self):
+        """
+        Function estimates the current progress of the sampler by comparing
+        the autocorrelation times and their changes to the beta and delta parameters.
+        """
+        # Computing only the current autocorrelation time.
+        interval = self.interval+1
+        tau1 = np.max(emcee.autocorr.integrated_time(np.swapaxes(self.chain, 0, 1)[:-1, ...], tol=0))
+        if interval >= self.iteration:
+            f_delta = 10.
+        # If there is only one dump file written set f_delta to 10.
+        else:
+            tau2 = np.max(emcee.autocorr.integrated_time(np.swapaxes(self.chain, 0, 1)[:-interval, ...], tol=0))
+            f_delta = np.abs(tau2-tau1)/tau1/self.delta
+
+        f_beta = tau1/self.iteration*self.beta
+        imax = np.maximum(self.iteration, int(f_beta*self.iteration))
+        nmax = np.maximum(int(np.ceil(np.log10(imax))), 8)
+        f = np.mean(tau1)*self.beta/self.iteration
+        N_est = int(f*self.iteration)
+        print("\nIterations: {:d}\n".format(self.iteration))
+        utils.print_meter("beta:      ", f_beta, 1., 10., cl="blue", cr="red", fmt="{:"+"{:d}".format(nmax)+".2f}")
+        utils.print_meter("delta:     ", f_delta, 1., 10., cl="blue", cr="red", fmt="{:"+"{:d}".format(nmax)+".2e}")
+        print()
+        utils.print_meter("Progress:  ", imax, self.iteration, imax, cl="green", cr="black", fmt="{:"+"{:d}".format(nmax)+"d}")
+        print()
