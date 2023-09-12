@@ -28,7 +28,7 @@ def run(yaml_file, restart, verbose):
 
     # Reading yaml file
     if verbose:
-            print(f"Reading '{yaml_file.name}'.")
+        print(f"Reading '{yaml_file.name}'.")
     dct = yaml.safe_load(yaml_file)
     
     # Reading dumpfile and deleting it if restarting

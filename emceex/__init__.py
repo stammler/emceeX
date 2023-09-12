@@ -1,5 +1,5 @@
-from emceex.emceex import EnsembleSampler
 from emceex import utils
+from emceex.emceex import EnsembleSampler
 
 __all__ = [
     "EnsembleSampler",

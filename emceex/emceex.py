@@ -1,3 +1,7 @@
+"""
+Extension of emcee.EnsembleSampler including monitoring tools.
+"""
+
 import cornerhex
 import dill
 import emcee
@@ -94,10 +98,13 @@ class EnsembleSampler(emcee.EnsembleSampler):
         # Keyword arguments passed to model function
         self.model_kwargs = model_kwargs
         
+        # Monitoring
+        self.monitor = Monitor(self)
         # These are stored later and are placeholder.
         # Used for monitoring.
-        self.beta = None
-        self.delta = None
+        self.monitor.beta = None
+        self.monitor.delta = None
+        self.monitor.interval = None
         
         # Initializing the EnsembleSampler
         super(EnsembleSampler, self).__init__(
@@ -370,9 +377,9 @@ class EnsembleSampler(emcee.EnsembleSampler):
             emcee.sample. Not all arguments will function.
         """
         # Storing convergence parameters for monitoring.
-        self.beta = beta
-        self.delta = delta
-        self.interval = interval
+        self.monitor.beta = beta
+        self.monitor.delta = delta
+        self.monitor.interval = interval
         # If the sampler has not run before, the initial state
         # of the walkers are picked randomly. Otherwise the
         # last values of the chains are used.
@@ -430,10 +437,8 @@ class EnsembleSampler(emcee.EnsembleSampler):
         # Try to get initial tau if run is continued. Use infinity else
         tau_old = np.inf
         if self.iteration>0:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                tau = np.mean(self.get_autocorr_time(tol=0))
-            if np.any(~np.isfinite(tau)):
+            tau = self.monitor.tau.max()
+            if ~np.isfinite(tau):
                 tau_old = np.inf
             else:
                 tau_old = tau
@@ -441,17 +446,14 @@ class EnsembleSampler(emcee.EnsembleSampler):
         for sample in sampler:
             # If we do not need to check for convergence or write dump file
             # simply continue with the next iteration,
-            if self.iteration%self.interval:
+            if self.iteration%self.monitor.interval:
                 continue
-            # Get the autocorrelation time. Ignore errors and warning
-            # if chain too short.
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                tau = np.max(self.get_autocorr_time(tol=0))
+            # Get the autocorrelation time.
+            tau = self.monitor.tau.max()
             # Normalized tau to beta
-            tau_n = self.beta*tau / self.iteration
+            tau_n = self.monitor.beta*tau / self.iteration
             # Relative change in autocorrelation time
-            delta_tau = np.abs(tau_old-tau)/tau/self.delta
+            delta_tau = np.abs(tau_old-tau)/tau/self.monitor.delta
             # Update the description of the progress bar.
             if verbose>1:
                 if np.isfinite(tau_n) and np.isfinite(delta_tau):
@@ -479,62 +481,56 @@ class EnsembleSampler(emcee.EnsembleSampler):
         # Would be red otherwise after break.
         if hasattr(sampler, "container"):
             sampler.container.children[1].bar_style = "success"
-
-                
-    def get_flat_samples(self, discard=None, thin=None):
+        
+        
+class Monitor(object):
+    """
+    Class to monitor progress of sampler.
+    """
+    
+    def __init__(self, sampler):
         """
-        Wrapper function to get flattened samples with
-        reasonable assumption on discard and thin.
+        Class to facilitate progress monitoring of sampler.
         
         Parameters
         ----------
-        discard : int, optional, default: None
-            Discard the first discard steps. Defaults to
-            three times the autocorrelation time.
-        thin : int, optional, default: None
-            Thin samples by thin. Defaults to half of the
-            autocorrelation time.
-            
-        Returns
-        -------
-        samples : array-like, (N, ndims)
-            Flattened samples
-            
-        Information
-        -----------
-        If discard is not given, three times of the
-        autocorrelation time will be discarded.
-        If thin is not given, the samples will be
-        thinned by half of the autocorrelation time.
-        The samples will be returned in actual parameters
-        space. Not in logarithmic space. If the
-        autocorrelation time is not finite discard will
-        be set to zero and thin to one.
+        samler : emceex.EnsembleSampler
+            EnsembleSampler to be monitored
         """
-        # Getting the autocorrelation time.
-        # This can raise warnings if the chain is too short.
-        # We ignore them.
+        self._sampler = sampler
+        self._savestate = {
+            "tau": {
+                "it": [],
+                "val": [],
+            },
+        }
+        
+    @property
+    def tau(self):
+        """
+        Autocorrelation time
+        """
+        # Check if autocorrelation time saved and up-to-date.
+        if len(self._savestate["tau"]["it"]):
+            if self._sampler.iteration == self._savestate["tau"]["it"][-1]:
+                return self._savestate["tau"]["val"][-1]
+        # If not compute tau.
+        # Ignore warning that may come up if chain too short
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore")
-            tau = np.mean(self.get_autocorr_time(tol=0))
-        # If the autocorrelation time is not finite and discard
-        # or thin are not set, they are manually set here.
-        if np.any(~np.isfinite(tau)):
-            if discard is None:
-                discard = 0
-            if thin is None:
-                thin = 1
-        else:
-            if discard is None:
-                discard = int(tau*3)
-            if thin is None:
-                thin = int(tau//2)
-        flat_samples = self.get_chain(discard=discard, thin=thin, flat=True)
-        flat_samples = np.where(self.log, 10.**flat_samples, flat_samples)
-        return flat_samples
+            tau = self._sampler.get_autocorr_time(tol=0)
+        # If the autocorrelation time is not finite we set it to
+        # one tenth of the current iteration.
+        tau = np.where(np.isfinite(tau), tau, self._sampler.iteration//10)
+        # Update savestate
+        self._savestate["tau"]["it"].append(self._sampler.iteration)
+        self._savestate["tau"]["val"].append(tau)
+        return tau
+    @tau.setter
+    def tau(self, value):
+        raise RuntimeError("Do not set `tau` manually.")
         
-        
-    def plot_walkers(self, width=6., alpha=0.1, theta=None, theta_labels=None):
+    def plot_walkers(self, width=6., alpha=0.1, theta=None, theta_labels=None, f_discard=3):
         """
         Function plots the walkers for inspection.
         
@@ -549,6 +545,9 @@ class EnsembleSampler(emcee.EnsembleSampler):
         theta_labels : str of list, optional, default: None
             Labels of theta values to be plotted
             in the legend
+        f_discard : float, optional, default: 3.
+            Labels of theta values to be plotted
+            in the legend
         
         Returns
         -------
@@ -557,12 +556,15 @@ class EnsembleSampler(emcee.EnsembleSampler):
         # Dimensions of a single plot
         height = width/6.
         # Get all walker chains
-        samples = self.get_chain()
+        samples = self._sampler.get_chain()
         # Convert chains to actual parameter space
-        samples = np.where(self.log[None, None, :], 10.**samples, samples)
-        fig, ax = plt.subplots(sharex=True, nrows=self.ndim, figsize=(width, self.ndim*height))
+        samples = np.where(self._sampler.log[None, None, :], 10.**samples, samples)
+        # Get autocorrelation times.
+        tau = self.tau
+        tau_max = tau.max()
+        fig, ax = plt.subplots(sharex=True, nrows=self._sampler.ndim, figsize=(width, self._sampler.ndim*height))
         x = np.arange(samples.shape[0])
-        for i in range(self.ndim):
+        for i in range(self._sampler.ndim):
             ax[i].plot(x, samples[:, :, i], lw=1, alpha=alpha, c="black")
             # Highlight one or more theta values with labels
             if theta is not None:
@@ -574,17 +576,20 @@ class EnsembleSampler(emcee.EnsembleSampler):
                         ax[i].plot(x, np.ones_like(x)*t[i], lw=1, label=label)
                 else:
                     ax[i].plot(x, np.ones_like(x)*theta[i], lw=1, label=theta_labels)
-            ax[i].set_ylabel(self.labels[i])
+            ax[i].set_ylabel(self._sampler.labels[i])
             # Change to log scale if parameter has been sampled logarithmically
-            if self.log[i]:
+            if self._sampler.log[i]:
                 ax[i].set_yscale("log")
+            # Plot autocorrelation time
+            if np.isfinite(tau[i]):
+                ax[i].axvline(tau[i], ls="--", c="C3", lw=1)
+                ax[i].axvline(f_discard*tau_max, c="C3", lw=1)
         ax[-1].set_xlabel("Steps")
         ax[-1].set_xlim(x.min(), x.max())
         if theta_labels:
             ax[0].legend(ncols=len(theta_labels), fontsize="x-small")
         fig.tight_layout()
         return fig, ax
-    
     
     def plot_data(self, width=6., height=3.75, theta=None, theta_labels=None, nsamples=0, alpha=0.1, discard=None, thin=None):
         """
@@ -618,13 +623,17 @@ class EnsembleSampler(emcee.EnsembleSampler):
         """
         fig, ax = plt.subplots(figsize=(width, height))
         # Plot the actual data
-        ax.errorbar(self.x, self.y, yerr=self.yerr, marker=".", linestyle="None", color="black", capsize=3, lw=1)
+        ax.errorbar(self._sampler.x, self._sampler.y, yerr=self._sampler.yerr, marker=".", linestyle="None", color="black", capsize=3, lw=1)
         # Plot nsamples random sample from walkers
+        samples = []
         if nsamples:
             flat_samples = self.get_flat_samples(discard=discard, thin=thin)
             inds = np.random.randint(len(flat_samples), size=nsamples)
             for i in inds:
-                ax.plot(self.x, self.model(theta=flat_samples[i]), alpha=alpha, c="black", lw=1)
+                y = self._sampler.model(theta=flat_samples[i])
+                samples.append(y)
+                ax.plot(self._sampler.x, y, alpha=alpha, c="black", lw=1)
+        samples = np.array(samples)
         # Highlight one or more theta values with labels
         if theta is not None:
             if len(np.array(theta).shape)>1:
@@ -632,17 +641,107 @@ class EnsembleSampler(emcee.EnsembleSampler):
                     label = None
                     if theta_labels:
                         label = theta_labels[i]
-                    ax.plot(self.x, self.model(theta=t), label=label, lw=1)
+                    ax.plot(self._sampler.x, self._sampler.model(theta=t), label=label, lw=1)
             else:
-                ax.plot(self.x, self.model(theta=theta), label=theta_labels, lw=1)
+                ax.plot(self._sampler.x, self._sampler.model(theta=theta), label=theta_labels, lw=1)
         ax.set_xlabel("$x$")
         ax.set_ylabel("$y$")
-        ax.set_xlim(self.x.min(), self.x.max())
+        ax.set_xlim(self._sampler.x.min(), self._sampler.x.max())
         if theta_labels:
             ax.legend()
         fig.tight_layout()
-        return fig, ax
+        return fig, ax, samples
     
+    def estimate_progress(self):
+        """
+        Function estimates the current progress of the sampler by comparing
+        the autocorrelation times and their changes to the beta and delta parameters.
+        """
+        # Computing change in correlation time
+        if len(self._savestate["tau"]["it"])<2:
+            f_delta = 10.
+        else:
+            taum1 = np.max(self._savestate["tau"]["val"][-1])
+            taum2 = np.max(self._savestate["tau"]["val"][-2])
+            f_delta = np.abs(taum2-taum1)/taum1/self.delta
+
+        f_beta = taum1/self._sampler.iteration*self.beta
+        imax = np.maximum(self._sampler.iteration, int(f_beta*self._sampler.iteration))
+        nmax = np.maximum(int(np.ceil(np.log10(imax))), 8)
+        f = np.max(taum1)*self.beta/self._sampler.iteration
+        N_est = int(f*self._sampler.iteration)
+        print("\nIterations: {:d}\n".format(self._sampler.iteration))
+        utils.print_meter("beta:      ", f_beta, 1., 10., cl="blue", cr="red", fmt="{:"+"{:d}".format(nmax)+".2f}")
+        utils.print_meter("delta:     ", f_delta, 1., 10., cl="blue", cr="red", fmt="{:"+"{:d}".format(nmax)+".2e}")
+        print()
+        utils.print_meter("Progress:  ", imax, self._sampler.iteration, imax, cl="green", cr="black", fmt="{:"+"{:d}".format(nmax)+"d}")
+        print()
+        
+    def evaluate_autocorrelation(self, display_meters=True, display_plot=True, width=6., height=3.75):
+        """
+        Function evaluates the autocorrelation time.
+        
+        Parameters
+        ----------
+        display_meters : boolen, optional, default: True
+            Show meters of all autocorrelation times
+        display_plot : boolean, optional, default: True
+            Show plot of the autocorrelation time evolution
+        width : float, optional, default: 6.
+            Width of plot
+        height : float, optional, default: 3.75
+            Height of plot
+        """
+        # Get autocorrelation times
+        tau = self.tau
+
+        # Display meters
+        if display_meters:
+            # Maximum character length of labels.
+            lmax = len("mean")
+            for i in range(self._sampler.ndim):
+                if len(self._sampler.labels[i])>lmax:
+                    lmax = len(self._sampler.labels[i])
+            # Maximum value of tau
+            tmax = tau.max()
+            # Maximum digits of tau
+            imax = int(np.ceil(np.log10(tmax)))
+
+            print()
+
+            spec = "    {label:<{lmax}}"
+            fmt = "{:" + "{:d}".format(imax) + ".0f}"
+            cl = "blue"
+            for i in range(self._sampler.ndim):
+                cr = "yellow"
+                if tau[i]>1.5*np.mean(tau):
+                    cr = "red"
+                s = spec.format(label=self._sampler.labels[i]+":", lmax=lmax+1)
+                utils.print_meter(s, tau[i], np.mean(tau), tmax, cl=cl, cr=cr, fmt=fmt)
+
+            print()
+            s = spec.format(label="mean:", lmax=lmax+1)
+            utils.print_meter(s, np.mean(tau), np.mean(tau), tmax, cl=cl, fmt=fmt)
+            print()
+
+        # Display plot of tau evolution
+        if display_plot:
+            if len(self._savestate["tau"]["it"])<2:
+                raise RuntimeError("You need to run the chain for longer.")
+            N_sample = np.linspace(self._savestate["tau"]["it"][0], self._sampler.iteration, 10, dtype=int)
+            fig, ax = plt.subplots(figsize=(width, height))
+            tau_lim = N_sample/self.beta
+            ax.set_xlim(N_sample.min(), N_sample.max())
+            ax.plot(self._savestate["tau"]["it"], np.max(self._savestate["tau"]["val"], axis=1), ".-", label="Sampler", c="black")
+            ax.plot(N_sample, tau_lim, "--", c="black", label=r"Convergence limit, $\beta = {:.0f}$".format(self.beta))
+            x, y = np.linspace(*ax.get_xlim(), 100), np.linspace(*ax.get_ylim(), 100)
+            cm = y[None, :]/x[:, None]*self.beta
+            ax.contourf(x, y, cm.T, levels=np.arange(1, 11), extend="both", cmap="coolwarm")
+            ax.contour(x, y, cm.T, levels=np.arange(1, 11), linewidths=0.5, colors="white", alpha=0.5, zorder=1)
+            ax.set_xlabel("Number of steps")
+            ax.set_ylabel("Estimated autocorrelation time")
+            ax.legend()
+            fig.tight_layout()
     
     def plot_pairs(self, discard=None, thin=None, **cornerhex_kwargs):
         """
@@ -671,12 +770,12 @@ class EnsembleSampler(emcee.EnsembleSampler):
         # get negative values for linearly sampled parameters.
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore")
-            flat_samples = np.where(self.log, np.log10(flat_samples), flat_samples)
+            flat_samples = np.where(self._sampler.log, np.log10(flat_samples), flat_samples)
         # Add "log" to labels where needed
         labels = []
         theta_median = self.get_theta(which="median")
-        for i, l in enumerate(self.labels):
-            if self.log[i]:
+        for i, l in enumerate(self._sampler.labels):
+            if self._sampler.log[i]:
                 labels.append("log "+l)
                 theta_median[i] = np.log10(theta_median[i])
             else:
@@ -689,7 +788,6 @@ class EnsembleSampler(emcee.EnsembleSampler):
             highlight=highlight,
             **cornerhex_kwargs,
         )
-    
     
     def get_theta(self, which="median", discard=None, thin=None):
         """
@@ -717,10 +815,10 @@ class EnsembleSampler(emcee.EnsembleSampler):
         """
         if which=="best":
             # Get all chains and convert to parameter space
-            samples = self.get_chain()
-            samples = np.where(self.log[None, None, :], 10.**samples, samples)
+            samples = self._sampler.get_chain()
+            samples = np.where(self._sampler.log[None, None, :], 10.**samples, samples)
             # Get log probability
-            log_prob = self.get_log_prob()
+            log_prob = self._sampler.get_log_prob()
             # Extrain chain and walker with highest log probability
             chain, walker = np.unravel_index(log_prob.argmax(), log_prob.shape)
             # Return state vector with highest log probability
@@ -732,124 +830,46 @@ class EnsembleSampler(emcee.EnsembleSampler):
             return np.percentile(flat_samples, 50, axis=0)
         else:
             raise RuntimeError("Unknown which: {}.".format(which))
-            
-    def evaluate_autocorrelation(self, display_meters=True, display_plot=True, N=15, width=6., height=3.75):
+
+                
+    def get_flat_samples(self, discard=None, thin=None):
         """
-        Function evaluates the autocorrelation time.
+        Wrapper function to get flattened samples with
+        reasonable assumption on discard and thin.
         
         Parameters
         ----------
-        display_meters : boolen, optional, default: True
-            Show meters of all autocorrelation times
-        display_plot : boolean, optional, default: True
-            Show plot of the autocorrelation time evolution
-        N : int, optional, default: 15
-            Evaluate autocorrelation time at N points
-        width : float, optional, default: 6.
-            Width of plot
-        height : float, optional, default: 3.75
-            Height of plot
+        discard : int, optional, default: None
+            Discard the first discard steps. Defaults to
+            three times the autocorrelation time.
+        thin : int, optional, default: None
+            Thin samples by thin. Defaults to half of the
+            autocorrelation time.
             
         Returns
         -------
-        tau : array-like, (ndims,)
-            Autocorrelation time for each parameter
+        samples : array-like, (N, ndims)
+            Flattened samples
+            
+        Information
+        -----------
+        If discard is not given, three times of the
+        autocorrelation time will be discarded.
+        If thin is not given, the samples will be
+        thinned by half of the autocorrelation time.
+        The samples will be returned in actual parameters
+        space. Not in logarithmic space. If the
+        autocorrelation time is not finite discard will
+        be set to zero and thin to one.
         """
-        # Ignore warning that may come up if chain too short
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore")
-            tau = self.get_autocorr_time(tol=0)
-        # If the autocorrelation time is not finite we set it to
-        # one tenth of the current iteration.
-        tau = np.where(np.isfinite(tau), tau, self.iteration//10)
-
-        # Display meters
-        if display_meters:
-            # Maximum character length of labels.
-            lmax = len("mean")
-            for i in range(self.ndim):
-                if len(self.labels[i])>lmax:
-                    lmax = len(self.labels[i])
-            # Maximum value of tau
-            tmax = tau.max()
-            # Maximum digits of tau
-            imax = int(np.ceil(np.log10(tmax)))
-
-            print()
-
-            spec = "    {label:<{lmax}}"
-            fmt = "{:" + "{:d}".format(imax) + ".0f}"
-            cl = "blue"
-            for i in range(self.ndim):
-                cr = "yellow"
-                if tau[i]>1.5*np.mean(tau):
-                    cr = "red"
-                s = spec.format(label=self.labels[i]+":", lmax=lmax+1)
-                utils.print_meter(s, tau[i], np.mean(tau), tmax, cl=cl, cr=cr, fmt=fmt)
-
-            print()
-            s = spec.format(label="mean:", lmax=lmax+1)
-            utils.print_meter(s, np.mean(tau), np.mean(tau), tmax, cl=cl, fmt=fmt)
-            print()
-
-        # Display plot of tau evolution
-        if display_plot:
-            # Compute estimates of the autocorrelation time
-            # Starting from 1000 of one tenth of the current iteration
-            start = np.minimum(1000, self.iteration//10)
-            fin = self.iteration
-            N_sample = np.linspace(start, fin, N, dtype=int)
-            tau_est = np.empty(N)
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                for i in tqdm(range(N), desc="Est. autocor. times", leave=False):
-                    j = N_sample[i]
-                    t = np.max(emcee.autocorr.integrated_time(np.swapaxes(self.chain, 0, 1)[:j, ...], tol=0))
-                    if ~np.isfinite(t):
-                        t = self.iteration//10
-                    tau_est[i] = t
-
-            fig, ax = plt.subplots(figsize=(width, height))
-            tau_lim = N_sample/self.beta
-            ax.set_xlim(N_sample.min(), N_sample.max())
-            ax.loglog(N_sample, tau_est, ".-", label="Sampler", c="black")
-            ax.loglog(N_sample, tau_lim, "--", c="black", label=r"Convergence limit, $\beta = {:.0f}$".format(self.beta))
-            x, y = np.linspace(*ax.get_xlim(), 100), np.geomspace(*ax.get_ylim(), 100)
-            cm = y[None, :]/x[:, None]*self.beta
-            ax.contourf(x, y, cm.T, levels=np.arange(1, 11), extend="both", cmap="coolwarm")
-            ax.contour(x, y, cm.T, levels=np.arange(1, 11), linewidths=0.5, colors="white", alpha=0.5, zorder=1)
-            ax.set_xlabel("Number of steps")
-            ax.set_ylabel("Estimated autocorrelation time")
-            ax.legend()
-            ax.set_xscale("linear")
-            ax.set_yscale("linear")
-            fig.tight_layout()
-
-        return tau
-    
-    def estimate_progress(self):
-        """
-        Function estimates the current progress of the sampler by comparing
-        the autocorrelation times and their changes to the beta and delta parameters.
-        """
-        # Computing only the current autocorrelation time.
-        interval = self.interval+1
-        tau1 = np.max(emcee.autocorr.integrated_time(np.swapaxes(self.chain, 0, 1)[:-1, ...], tol=0))
-        if interval >= self.iteration:
-            f_delta = 10.
-        # If there is only one dump file written set f_delta to 10.
-        else:
-            tau2 = np.max(emcee.autocorr.integrated_time(np.swapaxes(self.chain, 0, 1)[:-interval, ...], tol=0))
-            f_delta = np.abs(tau2-tau1)/tau1/self.delta
-
-        f_beta = tau1/self.iteration*self.beta
-        imax = np.maximum(self.iteration, int(f_beta*self.iteration))
-        nmax = np.maximum(int(np.ceil(np.log10(imax))), 8)
-        f = np.mean(tau1)*self.beta/self.iteration
-        N_est = int(f*self.iteration)
-        print("\nIterations: {:d}\n".format(self.iteration))
-        utils.print_meter("beta:      ", f_beta, 1., 10., cl="blue", cr="red", fmt="{:"+"{:d}".format(nmax)+".2f}")
-        utils.print_meter("delta:     ", f_delta, 1., 10., cl="blue", cr="red", fmt="{:"+"{:d}".format(nmax)+".2e}")
-        print()
-        utils.print_meter("Progress:  ", imax, self.iteration, imax, cl="green", cr="black", fmt="{:"+"{:d}".format(nmax)+"d}")
-        print()
+        # Getting the autocorrelation time.
+        tau = np.max(self.tau)
+        # If the autocorrelation time is not finite and discard
+        # or thin are not set, they are manually set here.
+        if discard is None:
+            discard = int(tau*3)
+        if thin is None:
+            thin = int(tau//2)
+        flat_samples = self._sampler.get_chain(discard=discard, thin=thin, flat=True)
+        flat_samples = np.where(self._sampler.log, 10.**flat_samples, flat_samples)
+        return flat_samples
